@@ -143,3 +143,40 @@ pkl_features_artist_path='features_artists_600k.pkl',
         artists_600_features.to_pickle(DATA_PATH+pkl_features_artist_path)
 
     return artists_600_features
+
+
+# Yearly featurings functions
+def get_largest_cc_by_year(spotify_600, DATA_PATH, read, yearly_dir_name = "yearly_600k"):
+    """
+    Function that returns two dictionaries, one with a dataframe for every year and one for the 
+    largest_cc for every year.
+    """
+    # Create year column
+    df_600 = spotify_600.copy()
+    df_600["year"] = [date.year for date in df_600.release_date]
+    # Get range of years
+    min_year, max_year = min(df_600.year), max(df_600.year)
+    songs_by_year = {}
+    nodes_yearly = {}
+    largest_cc_year = {}
+    for year in range(min_year, max_year+1):
+        # Songs for a given year
+        songs_by_year[year] = df_600[df_600.year == year].copy()
+        # Featurings for that year
+        featurings_year = songs_by_year[year][songs_by_year[year].num_artists > 1]
+        # Check that we have songs in that year
+        if len(featurings_year) == 0:
+            continue
+        # Create nodes for that year and the largest cc
+        nodes_yearly[year] = nodes_featuring(featurings_year, DATA_PATH=DATA_PATH, read=read, path=f'/{yearly_dir_name}/edge_list{year}.pkl')
+        edge_list = [tuple(l[:2]) for l in nodes_yearly[year].values.tolist()]
+        G = ntx.from_edgelist(edge_list)
+        largest_cc_year[year] = G.subgraph(max(ntx.connected_components(G), key=len))
+    return songs_by_year, largest_cc_year
+
+def draw_graph(G, with_labels = False, node_size = 20, fig_size = (15,15)):
+    """
+    Function that draws a graph.
+    """
+    fig, ax = plt.subplots(figsize=fig_size)
+    ntx.draw_networkx(G, with_labels=with_labels, node_size = node_size, ax = ax)
