@@ -120,39 +120,50 @@ def artists_features_creation(artists_600, spotify_600, DATA_PATH, read=True,
 
         ##### SOLO TRACKS
         # features for solo tracks of artists
-        solo_features = spotify_600[spotify_600.num_artists == 1].groupby('artist_id').agg({
-            a: 'mean' for a in feature_cols
-        })
+
+        # solo_features = spotify_600[spotify_600.num_artists == 1].groupby('artist_id').agg({
+        #    a: 'mean' for a in feature_cols
+        # })
 
         ##### FEATS INITIATED
         # features for featured tracks of artists: mean for track initiated by the artist
-        initiatied_feat_features = spotify_600[spotify_600.num_artists > 1].groupby('artist_id').agg({
-            a: 'mean' for a in feature_cols
-        })
+        # initiatied_feat_features = spotify_600[spotify_600.num_artists > 1].groupby('artist_id').agg({
+        #    a: 'mean' for a in feature_cols
+        # })
 
         ##### FEATS MEMBER OF
         # features for featured tracks of artists: mean for tracks where the artist is just part of it
-        cop_spot_600 = spotify_600[spotify_600.num_artists > 1].copy()
-        cop_spot_600.artists = cop_spot_600.artists.apply(lambda x: x[1:])
-
+        # cop_spot_600 = spotify_600[spotify_600.num_artists > 1].copy()
+        # cop_spot_600.artists = cop_spot_600.artists.apply(lambda x: x[1:])
+        #
         # split artist column into multiple rows
-        cop_spot_600 = cop_spot_600.explode('id_artists')
+        # cop_spot_600 = cop_spot_600.explode('id_artists')
 
         # group by artist and compute mean values
-        member_feat_features = cop_spot_600.groupby('id_artists').agg({
-            a: 'mean' for a in feature_cols
-        })
+        # member_feat_features = cop_spot_600.groupby('id_artists').agg({
+        #    a: 'mean' for a in feature_cols
+        # })
         # renaming for the join
 
+        ####################
+        # Average features
+
+        avg_features = spotify_600.explode('id_artists').groupby('id_artists').agg({
+            a: 'mean' for a in feature_cols
+        })
+
         ###### MERGES
-        artists_600_features = artists_600_features.join(solo_features.add_prefix('solo_'),
-                                                         how='left'
-                                                         )
+        # artists_600_features = artists_600_features.join(solo_features.add_prefix('solo_'),
+        #                                                how='left'
+        #                                                )
 
-        artists_600_features = artists_600_features.join(initiatied_feat_features.add_prefix('initiated_'),
-                                                         how='left', )
+        # artists_600_features = artists_600_features.join(initiatied_feat_features.add_prefix('initiated_'),
+        #                                                 how='left', )
 
-        artists_600_features = artists_600_features.join(member_feat_features.add_prefix('member_'),
+        # artists_600_features = artists_600_features.join(member_feat_features.add_prefix('member_'),
+        #                                                how='left')
+
+        artists_600_features = artists_600_features.join(avg_features.add_prefix('avg_'),
                                                          how='left')
 
         ##### SAVE
@@ -203,3 +214,125 @@ def draw_graph(G, with_labels=False, node_size=20, fig_size=(15, 15)):
     """
     fig, ax = plt.subplots(figsize=fig_size)
     ntx.draw_networkx(G, with_labels=with_labels, node_size=node_size, ax=ax)
+
+
+def explosive_df(df, column: str):
+    """
+    Function to go from a dataframe obtained with the explode function to the df from before.
+    """
+    def implode(data_frame=()):
+        inner_df = data_frame if len(data_frame) > 0 else df
+
+        def reduce_columns():
+            acc = {}
+            for col in inner_df.columns:
+                if col == column:
+                    acc[col] = lambda x: x.dropna().tolist()
+                    continue
+                acc[col] = lambda x: x.iloc[0]
+
+            return acc
+
+        return inner_df.groupby(inner_df.index, as_index=False).agg(
+            reduce_columns()
+        ).reset_index(drop=True)
+
+    return df.explode(column), implode
+
+
+def change_genres(genre):
+    """
+    This function takes in a genre, and will create 'overarching' genres.
+    If a genre is french rap, it will become rap
+    It is not perfect, because dance pop will become dance in this case.
+    Input: a single genre (exploded artists table based on genre)
+    Return: the changed genre
+    """
+    if 'dance' in genre:
+        genre = 'dance'
+    elif 'classical' in genre:
+        genre = 'classical'
+    elif 'rap' in genre or 'hip hop' in genre:
+        genre = 'rap'
+    elif 'latin' in genre:
+        genre = 'latin'
+    elif 'rock' in genre:
+        genre = 'rock'
+    elif 'pop' in genre:
+        genre = 'pop'
+    return genre
+
+
+def retrieve_popular_genres(genres):
+    """
+    :param genres: a dataframe of genres sorted by number of artists
+    :return: a dataframe with the six most popular genres
+    """
+    genres.loc[:, 'genre'] = genres.genre.apply(change_genres)
+    genres = genres.groupby('genre').agg({
+        'number_of_artists': 'sum'
+    }).reset_index()
+    popular_genres = genres.sort_values('number_of_artists', ascending=False).iloc[:6, :]
+    return popular_genres
+
+
+def get_graph_features_node_classification(genres, artists_600, artists_600_features, nodes_600):
+    """
+    :param genres: a dataframe of genres sorted by number of artists
+    :param artists_600: dataframe of artists from which we will filter only artists in a popular genre
+    :param artists_600_features: after filtering we select the features
+    :param nodes_600: df containing edge lists and number of song featurings
+    :return: Graph and Feature Matrix
+    """
+
+    popular_genres = retrieve_popular_genres(genres)
+
+    # select only artists with at least 1 genre
+    artists_600['num_genres'] = artists_600.genres.apply(lambda x: len(x))
+    artists_with_genres = artists_600[artists_600.num_genres >= 1].copy().explode('genres')
+    artists_with_genres['genres'] = artists_with_genres.genres.apply(change_genres)
+    artists_with_genres['popular'] = artists_with_genres['genres'].apply(lambda x: x in list(popular_genres.genre))
+    artists_popular_genres = artists_with_genres[artists_with_genres.popular == True]
+    artists_popular_genres['idx'] = artists_popular_genres.index
+    exploded, implode = explosive_df(artists_popular_genres, 'genres')
+    artists_node_classification = implode(exploded).set_index('idx')
+    artists_node_classification.drop(columns=['popular', 'num_genres'], inplace=True)
+
+    # then we select as genre only the least popular genre that artist belongs to.
+    # this is done 1) to balance classes
+    # 2) because it is usually more characteristic to an artist
+    # many artists might have done 'pop' once, but if they usually do classical
+    # they should be considered as such.
+    for row in artists_node_classification.itertuples():
+        for popular_genre in list(popular_genres.genre)[::-1]:
+            # Assign the most popular genre that the artist has
+            if popular_genre in row.genres:
+                artists_node_classification.at[row.Index, 'genres'] = popular_genre
+                break
+
+    # On this dataframe of artists, we merge the features matrix
+    data = artists_node_classification.merge(artists_600_features, how='left', on='artist_id').set_index('artist_id')
+    data.dropna(subset='name_y', inplace=True)
+
+    # Then we select only the edges for which the source and target are both in the table of artists that belong
+    # to a popular genre. From that, we create an edgelist (edge_info is a dataframe)
+    edge_info = nodes_600[(nodes_600.artist_1.isin(data.index.unique())) &
+                          (nodes_600.artist_2.isin(data.index.unique()))]
+
+    edgelist = [tuple(l[:2]) for l in edge_info.values.tolist()]
+    print(edgelist[:5])
+    # Create the graph
+    G = ntx.from_edgelist(edgelist)
+    # Select the largest connected component
+    S = [G.subgraph(c).copy() for c in ntx.connected_components(G)]
+    graph = S[0]
+
+    ## Then we create the feature matrix
+    # Make sure the index is not lost when we create the feature matrix
+    data['artist_id'] = data.index
+    node_info = pd.DataFrame([list(data.loc[idx]) for idx in list(graph.nodes)],
+                             columns=data.columns).set_index('artist_id')
+    # Drop duplicate columns
+    node_info.drop(['followers_y', 'genres_y', 'name_y', 'artist_popularity_y'], axis=1, inplace=True)
+
+    return graph, node_info
