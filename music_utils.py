@@ -6,7 +6,25 @@ from pathlib import Path
 from sklearn.model_selection import train_test_split
 import pandas as pd
 import itertools
-
+import random
+import os
+import matplotlib.pyplot as plt
+import seaborn as sns
+import re
+import random
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from node2vec import Node2Vec
+from sklearn.model_selection import train_test_split
+from music_utils import *
+from tqdm.auto import tqdm  # import tqdm for progress bar
+tqdm.pandas()
+from gensim.models import Word2Vec
+from sklearn import preprocessing
+from sklearn.metrics import f1_score, confusion_matrix, ConfusionMatrixDisplay
+from sklearn.model_selection import train_test_split
+from xgboost import XGBClassifier
+from sklearn.utils.class_weight import compute_sample_weight
 
 ###################
 # Utils for link prediction 
@@ -208,12 +226,12 @@ def get_largest_cc_by_year(spotify_600, DATA_PATH, read, yearly_dir_name="yearly
     return songs_by_year, largest_cc_year
 
 
-def draw_graph(G, with_labels=False, node_size=20, fig_size=(15, 15)):
+def draw_graph(G, with_labels=False, node_size=20, fig_size=(15, 15), colors = None):
     """
     Function that draws a graph.
     """
     fig, ax = plt.subplots(figsize=fig_size)
-    ntx.draw_networkx(G, with_labels=with_labels, node_size=node_size, ax=ax)
+    ntx.draw_networkx(G, with_labels=with_labels, node_size=node_size, ax=ax, node_colors = colors)
 
 
 def explosive_df(df, column: str):
@@ -336,3 +354,142 @@ def get_graph_features_node_classification(genres, artists_600, artists_600_feat
     node_info.drop(['followers_y', 'genres_y', 'name_y', 'artist_popularity_y'], axis=1, inplace=True)
 
     return graph, node_info
+
+
+class DeepWalk():
+    '''
+    Using this class: after initializing, run the generate_walks method to generate the random walks.
+    To generate the embeddings, run the skipgram method.
+    '''
+
+    def __init__(self, G: ntx.Graph, window: int, dims: int, num_walks: int, walk_length: int):
+        '''
+        G: the graph of which the node embeddings will be created
+        window: the window size
+        dims: the embedding size
+        num_walks: The number of random walks performed for each individual node
+        walk_length: The random walk length
+        '''
+
+        self.G = G
+        self.window = window
+        self.dims = dims
+        self.num_walks = num_walks
+        self.walk_length = walk_length
+        self.walks = None
+
+    def generate_walks(self):
+        '''
+        Generating the walks
+        '''
+
+        # store all vertices
+        V = list(self.G.nodes)
+        self.walks = []
+        for _ in range(self.num_walks):
+            # each iteration here makes a pass over the data to sample one walk for each node
+            # the random order of the vertices speeds up the convergence of SGD
+            random.shuffle(V)
+            for v in V:
+                self.walks.append(self.RandomWalk(v))
+        return self.walks
+
+    def RandomWalk(self, v):
+        # v is the root
+        walk = [v]
+        current = v
+        for _ in range(self.walk_length):
+            # neighbors of the current node
+            neighbors = [node for node in self.G.neighbors(current)]
+            # choose a neighbor to go to
+            current = np.random.choice(neighbors)
+            walk.append(current)
+
+        return walk
+
+    def skipgram(self):
+        '''
+        Calling the Word2Vec model that we will implement ourselves
+        '''
+
+        model = Word2Vec(sentences=self.walks, vector_size=self.dims, window=self.window, workers=4)
+
+        # return the embeddings (word vectors)
+        return model.wv
+
+
+def visualize(graph, node2embedding, y, id_to_number, labeled=False):
+    nodelist = list(graph.nodes())
+    y = list(y)
+
+    # Embedding vectors
+    x = np.asarray([node2embedding[id_to_number[node]] for node in nodelist])
+    x_embedded = TSNE(n_components=2).fit_transform(x)
+    print(f'TSNE succesfully applied: x now of shape: {x_embedded.shape}')
+    df = pd.DataFrame({"Axis 1": x_embedded[:, 0], "Axis 2": x_embedded[:, 1]})
+
+    if not labeled:
+        # plt.figure(figsize=(10,10))
+        ax = sns.scatterplot(
+            x="Axis 1", y="Axis 2",
+            # palette=sns.color_palette(["mediumseagreen", "navy"]),
+            data=df,
+            alpha=0.8
+        )
+    else:
+        # plt.figure(figsize=(10,10))
+        ax = sns.scatterplot(
+            x="Axis 1", y="Axis 2",
+            # palette=sns.color_palette(["navy", "mediumseagreen"]),
+            data=df,
+            alpha=0.8,
+            hue=y
+        )
+
+    plt.figure(figsize=(20, 20))
+
+
+def predict(embeddings, y, model='lr'):
+    """
+    :param G: the networkx graph
+    :param embeddings: embeddings created by deepwalk
+    :param return_f1_score: return f1 scores (both binary and macro f1), select this when you want to keep track of scores
+    :param return_train_test: return the train and test labels for later use (keep same test set over all benchmarks)
+    :param model: the model to use
+    This function runs an ML model on the embeddings generated by deepwalk
+    """
+    plt.set_cmap('RdYlGn')
+
+    y = list(y)
+
+    # Train/test split
+    X_train, X_test, y_train, y_test = train_test_split(embeddings, y, test_size=0.2, shuffle=True, stratify=y)
+
+    sample_weights = compute_sample_weight('balanced', y_train)
+
+    # Train logistic regression
+    if model == 'lr':
+        model = LogisticRegression(class_weight='balanced')
+        model.fit(X_train, y_train)
+
+    elif model == 'xgb':
+        # need to have done the label encoding
+        model = XGBClassifier(max_depth=10)
+        model.fit(X_train, y_train, sample_weight=sample_weights)
+    elif model == 'rf':
+        model = RandomForestClassifier(max_depth=10, class_weight='balanced')
+        model.fit(X_train, y_train)
+
+    y_pred = model.predict(X_test)
+
+    # Evaluate predictions
+
+    macro_f1 = f1_score(y_test, y_pred, average='macro')
+    print(f'Macro test F1: {macro_f1}')
+    accuracy = sum(y_test == y_pred) / len(y_pred)
+    print(f'Accuracy: {accuracy}')
+
+    cm = confusion_matrix(y_test, y_pred)
+    disp = ConfusionMatrixDisplay(cm)
+    disp.plot()
+    return macro_f1
